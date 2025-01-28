@@ -1,18 +1,26 @@
 package main
 
 import (
-	"fmt"
+	"bytes"
+	"html/template"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"strings"
+
+	"github.com/adrg/frontmatter"
+	"github.com/yuin/goldmark"
+	highlighting "github.com/yuin/goldmark-highlighting/v2"
 )
 
 func main(){
 	mux := http.NewServeMux()
 
+	postTemplate := template.Must(template.ParseFiles("post.gohtml"))
+
 	fr := FileReader{}
-	mux.HandleFunc("GET /posts/{slug}", PostHandler(fr))
+	mux.HandleFunc("GET /posts/{slug}", PostHandler(fr,postTemplate))
 
 	err := http.ListenAndServe(":3030", mux)
 	if err != nil{
@@ -39,15 +47,54 @@ func(fr FileReader) Read(slug string) (string, error){
 	return string(b), nil
 }
 
-func PostHandler (sl SlugReader) (http.HandlerFunc) {
+type PostData struct{
+	Content template.HTML
+	Title string `toml:"title"`
+	Author Author `toml:"author"`
+
+}
+
+type Author struct{
+	Name string `toml:"name"`
+	Email string `toml:"email"`
+}
+
+func PostHandler (sl SlugReader, tmpl *template.Template) (http.HandlerFunc) {
+	mdRenderer := goldmark.New(
+		goldmark.WithExtensions(highlighting.NewHighlighting(
+			highlighting.WithStyle("dracula"),
+				),
+			),
+		)
+
 	return func(w http.ResponseWriter, r *http.Request){
 		slug := r.PathValue("slug")
+
 		postMarkdown, err := sl.Read(slug)
 		if err != nil{
 			//TODO Handle different Errors in the future
 			http.Error(w, "Post not found", http.StatusNotFound)
 			return
 		}
-		fmt.Fprint(w, postMarkdown)
+
+		var post PostData
+		remainingMd, err := frontmatter.Parse(strings.NewReader(postMarkdown), &post)
+		if err != nil{
+			http.Error(w, "Error parsing frontmatter", http.StatusInternalServerError)
+		}
+
+		var buf bytes.Buffer
+		err = mdRenderer.Convert([]byte(remainingMd),&buf)
+		if err != nil{
+			panic(err)
+		}
+
+		post.Content = template.HTML(buf.String())
+
+		err = tmpl.Execute(w, post)
+		if err != nil{
+			http.Error(w, "Error executing Template", http.StatusInternalServerError)
+			return
+		}
 	}
 }
